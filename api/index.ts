@@ -73,9 +73,48 @@ async function isMaintenanceActive(chatId: number): Promise<boolean> {
   return false;
 }
 
-// Ensure User in Database
+// Fast In-Memory Caching
+const userCache = new Map<number, { user: any; timestamp: number }>();
+let cachedCategories: any[] | null = null;
+let lastCatFetch = 0;
+let cachedWallets: any[] | null = null;
+let lastWalletsFetch = 0;
+
+export function invalidateStoreCache() {
+  cachedCategories = null;
+  lastCatFetch = 0;
+  cachedWallets = null;
+  lastWalletsFetch = 0;
+}
+
+async function getCategoriesFast(): Promise<any[]> {
+  const now = Date.now();
+  if (cachedCategories && (now - lastCatFetch < 20000)) {
+    return cachedCategories;
+  }
+  cachedCategories = await allQuery<any>('SELECT * FROM categories ORDER BY id ASC');
+  lastCatFetch = now;
+  return cachedCategories;
+}
+
+async function getWalletsFast(): Promise<any[]> {
+  const now = Date.now();
+  if (cachedWallets && (now - lastWalletsFetch < 20000)) {
+    return cachedWallets;
+  }
+  cachedWallets = await allQuery<any>('SELECT * FROM wallets ORDER BY id ASC');
+  lastWalletsFetch = now;
+  return cachedWallets;
+}
+
+// Ensure User in Database with fast memory cache
 async function getOrCreateUser(from?: { id: number; first_name?: string; username?: string }, referredBy?: number) {
   if (!from) return null;
+  const now = Date.now();
+  const cached = userCache.get(from.id);
+  if (cached && (now - cached.timestamp < 15000)) {
+    return cached.user;
+  }
   try {
     let user = await getQuery<any>('SELECT * FROM users WHERE telegram_user_id = ?', [from.id]);
     if (!user) {
@@ -90,10 +129,13 @@ async function getOrCreateUser(from?: { id: number; first_name?: string; usernam
       user.first_name = from.first_name;
       user.username = from.username;
     }
+    if (user) {
+      userCache.set(from.id, { user, timestamp: now });
+    }
     return user;
   } catch (err) {
     console.error('Error in getOrCreateUser:', err);
-    return null;
+    return cached?.user || null;
   }
 }
 
@@ -730,12 +772,16 @@ function setupBotHandlers(bot: TelegramBot) {
         }
       }
 
-      const user = await getOrCreateUser(msg.from, referredBy);
+      const [user, userOrders] = await Promise.all([
+        getOrCreateUser(msg.from, referredBy),
+        getQuery<{ count: number }>('SELECT COUNT(*) as count FROM orders WHERE telegram_user_id = ?', [chatId]),
+        clearSession(chatId)
+      ]);
+
       const lang = user?.language || 'ar';
       const currency = user?.currency || 'EGP';
       const userName = msg.chat.first_name || (lang === 'en' ? 'Valued Customer' : 'عميلنا العزيز');
       const balanceFormatted = formatMoney(user?.balance || 0, currency, lang);
-      const userOrders = await getQuery<{ count: number }>('SELECT COUNT(*) as count FROM orders WHERE telegram_user_id = ?', [chatId]);
 
       const welcomeText = lang === 'en'
         ? `✨ <b>Welcome to DIGITAL VALUE STORE!</b> ✨\n` +
@@ -775,15 +821,16 @@ function setupBotHandlers(bot: TelegramBot) {
         ]
       };
 
-      await bot?.sendMessage(chatId, welcomeText, {
-        parse_mode: 'HTML',
-        reply_markup: getMainKeyboard(lang)
-      });
-
-      await bot?.sendMessage(chatId, lang === 'en' ? '⚡ <b>Quick Shortcuts:</b>' : '⚡ <b>الوصول السريع للخدمات:</b>', {
-        parse_mode: 'HTML',
-        reply_markup: inlineQuickMenu
-      });
+      await Promise.all([
+        safeBotEdit(() => bot?.sendMessage(chatId, welcomeText, {
+          parse_mode: 'HTML',
+          reply_markup: getMainKeyboard(lang)
+        })),
+        safeBotEdit(() => bot?.sendMessage(chatId, lang === 'en' ? '⚡ <b>Quick Shortcuts:</b>' : '⚡ <b>الوصول السريع للخدمات:</b>', {
+          parse_mode: 'HTML',
+          reply_markup: inlineQuickMenu
+        }))
+      ]);
     } catch (err: any) {
       console.error('Error in /start handler:', err);
     }
@@ -1292,6 +1339,7 @@ function setupBotHandlers(bot: TelegramBot) {
       const data = query.data;
 
       if (!chatId || !data) return;
+      safeBotEdit(() => bot?.answerCallbackQuery(query.id));
       if (await isMaintenanceActive(chatId)) return;
 
       const user = await getOrCreateUser(query.from);
