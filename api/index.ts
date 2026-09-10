@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
 import TelegramBot from 'node-telegram-bot-api';
-import { initDatabase, ensureDatabase, runQuery, allQuery, getQuery, getSettings, saveSettings, getMaintenanceSettings, saveMaintenanceSettings, getAdminUser, saveAdminUser } from '../src/db.js';
+import { initDatabase, ensureDatabase, runQuery, allQuery, getQuery, getSettings, saveSettings, getMaintenanceSettings, saveMaintenanceSettings, getAdminUser, saveAdminUser, getSession, setSession, clearSession } from '../src/db.js';
 import { findBrandIcon } from '../src/iconLibrary.js';
 
 const app = express();
@@ -553,24 +553,6 @@ async function rejectOrder(orderId: number, reason: string): Promise<{ success: 
   }
 }
 
-// Active checkout sessions: { [telegramUserId]: { productId, walletId, quantity, step, createdAt, remindersCount } }
-const checkoutSessions: Record<number, { 
-  productId?: number; 
-  walletId?: number; 
-  quantity?: number;
-  step: string; 
-  createdAt?: number; 
-  remindersCount?: number;
-}> = {};
-
-// Active balance deposit sessions
-const depositSessions: Record<number, {
-  step: 'awaiting_amount' | 'awaiting_wallet' | 'awaiting_receipt';
-  amount?: number;
-  walletId?: number;
-  createdAt?: number;
-}> = {};
-
 // Broadcast notification to all customers when product stock is replenished
 async function notifyRestock(productId: number, productName: string, price: number, newStockCount: number) {
   if (!bot || botStatus !== 'Active' || newStockCount <= 0) return;
@@ -819,8 +801,9 @@ function setupBotHandlers(bot: TelegramBot) {
       const lang = user?.language || 'ar';
       const currency = user?.currency || 'EGP';
 
-      const checkout = checkoutSessions[chatId];
-      const deposit = depositSessions[chatId];
+      const userSession = await getSession(chatId);
+      const checkout = userSession?.type === 'checkout' ? userSession.data : null;
+      const deposit = userSession?.type === 'deposit' ? userSession.data : null;
 
       if (msg.text?.startsWith('/')) return;
 
@@ -834,11 +817,12 @@ function setupBotHandlers(bot: TelegramBot) {
 
         deposit.amount = amount;
         deposit.step = 'awaiting_wallet';
+        await setSession(chatId, 'deposit', deposit);
 
         const wallets = await allQuery<any>('SELECT * FROM wallets');
         if (wallets.length === 0) {
           await bot?.sendMessage(chatId, lang === 'en' ? '❌ Sorry, no payment gateways are active right now.' : '❌ عذراً، لا توجد بوابات دفع مفعلة حالياً.');
-          delete depositSessions[chatId];
+          await clearSession(chatId);
           return;
         }
 
@@ -876,7 +860,7 @@ function setupBotHandlers(bot: TelegramBot) {
           const product = await getQuery<any>('SELECT * FROM products WHERE id = ?', [checkout.productId]);
           if (!product) {
             await bot?.sendMessage(chatId, lang === 'en' ? '❌ Sorry, this product is no longer available.' : '❌ عذراً، لم يعد هذا المنتج متوفراً.');
-            delete checkoutSessions[chatId];
+            await clearSession(chatId);
             return;
           }
 
@@ -884,6 +868,7 @@ function setupBotHandlers(bot: TelegramBot) {
           checkout.step = 'payment_method';
           checkout.createdAt = Date.now();
           checkout.remindersCount = 0;
+          await setSession(chatId, 'checkout', checkout);
 
           const userBalance = Number(user?.balance || 0);
           const wallets = await allQuery<any>('SELECT * FROM wallets');
@@ -1077,151 +1062,229 @@ function setupBotHandlers(bot: TelegramBot) {
 
       // Handle sending Photo/Document receipts
       const isPhoto = !!(msg.photo && msg.photo.length > 0);
-      const isDocImage = !!(msg.document && msg.document.mime_type?.startsWith('image/'));
+      const isDocImage = !!(msg.document && (msg.document.mime_type?.startsWith('image/') || msg.document.file_name?.match(/\.(jpe?g|png|webp|heic)$/i)));
 
-      // Check Deposit Receipt Submission
-      if ((isPhoto || isDocImage) && deposit && deposit.step === 'awaiting_receipt') {
-        const amount = deposit.amount || 0;
-        const walletId = deposit.walletId || 0;
+      if (isPhoto || isDocImage) {
         const fileId = isPhoto ? msg.photo![msg.photo!.length - 1].file_id : msg.document!.file_id;
 
-        try {
-          const wallet = await getQuery<any>('SELECT * FROM wallets WHERE id = ?', [walletId]);
-          const depositRes = await runQuery(`
-            INSERT INTO balance_deposits (telegram_user_id, amount, wallet_id, proof_file_id, status)
-            VALUES (?, ?, ?, ?, 'pending')
-          `, [chatId, amount, walletId, fileId]);
+        // 1. Check Deposit Receipt Submission
+        if (deposit && deposit.step === 'awaiting_receipt') {
+          const amount = deposit.amount || 0;
+          const walletId = deposit.walletId || 0;
 
-          const depositId = depositRes.lastID;
-          delete depositSessions[chatId];
+          try {
+            const wallet = await getQuery<any>('SELECT * FROM wallets WHERE id = ?', [walletId]);
+            const depositRes = await runQuery(`
+              INSERT INTO balance_deposits (telegram_user_id, amount, wallet_id, proof_file_id, status)
+              VALUES (?, ?, ?, ?, 'pending')
+            `, [chatId, amount, walletId, fileId]);
 
-          const formattedAmount = formatMoney(amount, currency, lang);
-          const successDepositText = lang === 'en'
-            ? `✅ <b>Deposit Receipt Received Successfully!</b>\n` +
-              `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
-              `▫️ <b>Transaction ID:</b> <code>#DEP-${depositId}</code>\n` +
-              `▫️ <b>Amount:</b> <b>${formattedAmount}</b>\n` +
-              `▫️ <b>Payment Gateway:</b> <b>${escapeHtml(wallet?.name || 'Wallet')}</b>\n\n` +
-              `⏳ <i>Your receipt is being verified by our administration team. Your wallet balance will be credited within minutes! Thank you for choosing us 💎</i>`
-            : `✅ <b>تم استلام إيصال شحن الرصيد بنجاح!</b>\n` +
-              `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
-              `▫️ <b>رقم العملية:</b> <code>#DEP-${depositId}</code>\n` +
-              `▫️ <b>المبلغ المراد شحنه:</b> <b>${formattedAmount}</b>\n` +
-              `▫️ <b>بوابة التحويل:</b> <b>${escapeHtml(wallet?.name || 'محفظة')}</b>\n\n` +
-              `⏳ <i>جاري مراجعة الإيصال من الإدارة وسيتم إضافة الرصيد لمحفظتك خلال دقائق معدودة! شكراً لثقتك بنا 💎</i>`;
+            const depositId = depositRes.lastID;
+            await clearSession(chatId);
 
-          const quickKb = {
-            inline_keyboard: [
-              [{ text: lang === 'en' ? '🛍️ Browse Products' : '🛍️ تصفح المنتجات', callback_data: 'show_categories' }],
-              [{ text: lang === 'en' ? '🔙 Main Menu' : '🔙 القائمة الرئيسية', callback_data: 'back_to_menu' }]
-            ]
-          };
+            const formattedAmount = formatMoney(amount, currency, lang);
+            const successDepositText = lang === 'en'
+              ? `✅ <b>Deposit Receipt Received Successfully!</b>\n` +
+                `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
+                `▫️ <b>Transaction ID:</b> <code>#DEP-${depositId}</code>\n` +
+                `▫️ <b>Amount:</b> <b>${formattedAmount}</b>\n` +
+                `▫️ <b>Payment Gateway:</b> <b>${escapeHtml(wallet?.name || 'Wallet')}</b>\n\n` +
+                `⏳ <i>Your receipt is being verified by our administration team. Your wallet balance will be credited within minutes! Thank you for choosing us 💎</i>`
+              : `✅ <b>تم استلام إيصال شحن الرصيد بنجاح!</b>\n` +
+                `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
+                `▫️ <b>رقم العملية:</b> <code>#DEP-${depositId}</code>\n` +
+                `▫️ <b>المبلغ المراد شحنه:</b> <b>${formattedAmount}</b>\n` +
+                `▫️ <b>بوابة التحويل:</b> <b>${escapeHtml(wallet?.name || 'محفظة')}</b>\n\n` +
+                `⏳ <i>جاري مراجعة الإيصال من الإدارة وسيتم إضافة الرصيد لمحفظتك خلال دقائق معدودة! شكراً لثقتك بنا 💎</i>`;
 
-          await bot?.sendMessage(chatId, successDepositText, { parse_mode: 'HTML', reply_markup: quickKb });
-        } catch (e) {
-          console.error('Error handling deposit proof:', e);
-          await bot?.sendMessage(chatId, lang === 'en' ? '❌ Error recording deposit. Please contact support.' : '❌ حدث خطأ في تسجيل عملية الشحن، يرجى التواصل مع الدعم.');
-        }
-        return;
-      }
+            const quickKb = {
+              inline_keyboard: [
+                [{ text: lang === 'en' ? '🛍️ Browse Products' : '🛍️ تصفح المنتجات', callback_data: 'show_categories' }],
+                [{ text: lang === 'en' ? '🔙 Main Menu' : '🔙 القائمة الرئيسية', callback_data: 'back_to_menu' }]
+              ]
+            };
 
-      // Check Order Receipt Submission
-      if ((isPhoto || isDocImage) && checkout && checkout.step === 'awaiting_receipt') {
-        const productId = checkout.productId;
-        const walletId = checkout.walletId;
+            await bot?.sendMessage(chatId, successDepositText, { parse_mode: 'HTML', reply_markup: quickKb });
 
-        if (!productId || !walletId) {
-          bot?.sendMessage(chatId, lang === 'en' ? '❌ Session error, please start over.' : '❌ حدث خطأ في معالجة طلبك، يرجى المحاولة مرة أخرى.');
-          delete checkoutSessions[chatId];
+            // Notify Admin on Telegram
+            if (TELEGRAM_ADMIN_CHAT_ID && bot) {
+              try {
+                const adminDepMsg = `💳 <b>طلب شحن رصيد جديد للمحفظة!</b>\n` +
+                  `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 <b>رقم العملية:</b> #DEP-${depositId}\n` +
+                  `👤 <b>العميل:</b> ${escapeHtml(msg.chat.first_name || 'عميل')} (@${escapeHtml(msg.chat.username || 'لا يوجد')} - <code>${chatId}</code>)\n` +
+                  `💰 <b>المبلغ المراد شحنه:</b> <b>${formattedAmount}</b>\n` +
+                  `💳 <b>بوابة التحويل:</b> ${escapeHtml(wallet?.name || 'محفظة')}\n\n` +
+                  `📸 <i>يرجى مراجعة إيصال التحويل وشحن رصيد العميل من لوحة التحكم.</i>`;
+
+                if (isPhoto) {
+                  await bot.sendPhoto(TELEGRAM_ADMIN_CHAT_ID, fileId, { caption: adminDepMsg, parse_mode: 'HTML' });
+                } else {
+                  await bot.sendDocument(TELEGRAM_ADMIN_CHAT_ID, fileId, { caption: adminDepMsg, parse_mode: 'HTML' });
+                }
+              } catch (adminErr: any) {
+                console.error('Failed to send admin deposit alert:', adminErr.message);
+              }
+            }
+          } catch (e) {
+            console.error('Error handling deposit proof:', e);
+            await bot?.sendMessage(chatId, lang === 'en' ? '❌ Error recording deposit. Please contact support.' : '❌ حدث خطأ في تسجيل عملية الشحن، يرجى التواصل مع الدعم.');
+          }
           return;
         }
 
-        try {
-          const product = await getQuery<any>('SELECT * FROM products WHERE id = ?', [productId]);
-          const wallet = await getQuery<any>('SELECT * FROM wallets WHERE id = ?', [walletId]);
+        // 2. Check Order Receipt Submission
+        if (checkout && checkout.step === 'awaiting_receipt') {
+          const productId = checkout.productId;
+          const walletId = checkout.walletId;
 
-          if (!product) {
-            bot?.sendMessage(chatId, lang === 'en' ? '❌ Product is no longer available.' : '❌ هذا المنتج لم يعد متوفراً.');
-            delete checkoutSessions[chatId];
+          if (!productId || !walletId) {
+            await bot?.sendMessage(chatId, lang === 'en' ? '❌ Session error, please start over.' : '❌ حدث خطأ في معالجة طلبك، يرجى المحاولة مرة أخرى.');
+            await clearSession(chatId);
             return;
           }
 
-          const qty = checkout.quantity || 1;
-          const totalPrice = product.price * qty;
+          try {
+            const product = await getQuery<any>('SELECT * FROM products WHERE id = ?', [productId]);
+            const wallet = await getQuery<any>('SELECT * FROM wallets WHERE id = ?', [walletId]);
 
-          // Generate Order
-          const orderResult = await runQuery(`
-            INSERT INTO orders (telegram_user_id, telegram_username, telegram_first_name, status, total_price, wallet_id)
-            VALUES (?, ?, ?, 'pending_approval', ?, ?)
-          `, [
-            chatId,
-            msg.chat.username || '',
-            msg.chat.first_name || '',
-            totalPrice,
-            walletId
-          ]);
+            if (!product) {
+              await bot?.sendMessage(chatId, lang === 'en' ? '❌ Product is no longer available.' : '❌ هذا المنتج لم يعد متوفراً.');
+              await clearSession(chatId);
+              return;
+            }
 
-          const orderId = orderResult.lastID;
+            const qty = checkout.quantity || 1;
+            const totalPrice = product.price * qty;
 
-          // Insert order item
-          await runQuery(`
-            INSERT INTO order_items (order_id, product_id, product_name, price, quantity)
-            VALUES (?, ?, ?, ?, ?)
-          `, [orderId, product.id, product.name, product.price, qty]);
+            // Generate Order
+            const orderResult = await runQuery(`
+              INSERT INTO orders (telegram_user_id, telegram_username, telegram_first_name, status, total_price, wallet_id)
+              VALUES (?, ?, ?, 'pending_approval', ?, ?)
+            `, [
+              chatId,
+              msg.chat.username || '',
+              msg.chat.first_name || '',
+              totalPrice,
+              walletId
+            ]);
 
-          // Save payment proof photo
-          const fileId = isPhoto ? msg.photo![msg.photo!.length - 1].file_id : msg.document!.file_id;
+            const orderId = orderResult.lastID;
 
-          await runQuery(`
-            INSERT INTO payment_proofs (order_id, file_id)
-            VALUES (?, ?)
-          `, [orderId, fileId]);
+            // Insert order item
+            await runQuery(`
+              INSERT INTO order_items (order_id, product_id, product_name, price, quantity)
+              VALUES (?, ?, ?, ?, ?)
+            `, [orderId, product.id, product.name, product.price, qty]);
 
-          // Clear session
-          delete checkoutSessions[chatId];
+            // Save payment proof photo
+            await runQuery(`
+              INSERT INTO payment_proofs (order_id, file_id)
+              VALUES (?, ?)
+            `, [orderId, fileId]);
 
-          const totalFormatted = formatMoney(totalPrice, currency, lang);
-          const customerMessage = lang === 'en'
-            ? `🎉 <b>Payment Receipt Received! Order is under review.</b>\n` +
-              `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
-              `📝 <b>Order Details:</b>\n` +
-              `• <b>Order ID:</b> <code>#${orderId}</code>\n` +
-              `• <b>Product:</b> <b>${escapeHtml(product.name)}</b>\n` +
-              `• <b>Quantity:</b> <b>${qty} item(s)</b>\n` +
-              `• <b>Total Amount:</b> <b>${totalFormatted}</b>\n` +
-              `• <b>Payment Gateway:</b> <b>${escapeHtml(wallet ? wallet.name : 'Digital Wallet')}</b>\n\n` +
-              `⏳ <i>Your order is currently being verified by the management team. Your digital code will be delivered here instantly upon confirmation!</i>`
-            : `🎉 <b>تم استلام إيصال الدفع بنجاح! طلبك قيد المراجعة الفورية.</b>\n` +
-              `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
-              `📝 <b>تفاصيل الطلب:</b>\n` +
-              `• <b>رقم الطلب:</b> <code>#${orderId}</code>\n` +
-              `• <b>المنتج / الخدمة:</b> <b>${escapeHtml(product.name)}</b>\n` +
-              `• <b>الكمية المطلوبة:</b> <b>${qty} قطعة</b>\n` +
-              `• <b>السعر الإجمالي:</b> <b>${totalFormatted}</b>\n` +
-              `• <b>طريقة التحويل:</b> <b>${escapeHtml(wallet ? wallet.name : 'محفظة رقمية')}</b>\n\n` +
-              `⏳ <i>طلبك الآن قيد المراجعة السريعة من فريق الإدارة. ستتلقى كود التفعيل ورسالة التأكيد هنا فوراً! شكراً لاختيارك ديجيتال ڤاليو 💎</i>`;
+            // Clear session
+            await clearSession(chatId);
 
-          const customerKeyboard = {
-            inline_keyboard: [
-              [
-                { text: lang === 'en' ? '📦 Track My Orders' : '📦 متابعة سجل طلباتي', callback_data: 'my_orders' },
-                { text: lang === 'en' ? '🛍️ Shop More' : '🛍️ شراء منتجات أخرى', callback_data: 'show_categories' }
-              ],
-              [
-                { text: lang === 'en' ? '🔙 Main Menu' : '🔙 القائمة الرئيسية', callback_data: 'back_to_menu' }
+            const totalFormatted = formatMoney(totalPrice, currency, lang);
+            const customerMessage = lang === 'en'
+              ? `🎉 <b>Payment Receipt Received! Order is under review.</b>\n` +
+                `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
+                `📝 <b>Order Details:</b>\n` +
+                `• <b>Order ID:</b> <code>#${orderId}</code>\n` +
+                `• <b>Product:</b> <b>${escapeHtml(product.name)}</b>\n` +
+                `• <b>Quantity:</b> <b>${qty} item(s)</b>\n` +
+                `• <b>Total Amount:</b> <b>${totalFormatted}</b>\n` +
+                `• <b>Payment Gateway:</b> <b>${escapeHtml(wallet ? wallet.name : 'Digital Wallet')}</b>\n\n` +
+                `⏳ <i>Your order is currently being verified by the management team. Your digital code will be delivered here instantly upon confirmation!</i>`
+              : `🎉 <b>تم استلام إيصال الدفع بنجاح! طلبك قيد المراجعة الفورية.</b>\n` +
+                `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
+                `📝 <b>تفاصيل الطلب:</b>\n` +
+                `• <b>رقم الطلب:</b> <code>#${orderId}</code>\n` +
+                `• <b>المنتج / الخدمة:</b> <b>${escapeHtml(product.name)}</b>\n` +
+                `• <b>الكمية المطلوبة:</b> <b>${qty} قطعة</b>\n` +
+                `• <b>السعر الإجمالي:</b> <b>${totalFormatted}</b>\n` +
+                `• <b>طريقة التحويل:</b> <b>${escapeHtml(wallet ? wallet.name : 'محفظة رقمية')}</b>\n\n` +
+                `⏳ <i>طلبك الآن قيد المراجعة السريعة من فريق الإدارة. ستتلقى كود التفعيل ورسالة التأكيد هنا فوراً! شكراً لاختيارك ديجيتال ڤاليو 💎</i>`;
+
+            const customerKeyboard = {
+              inline_keyboard: [
+                [
+                  { text: lang === 'en' ? '📦 Track My Orders' : '📦 متابعة سجل طلباتي', callback_data: 'my_orders' },
+                  { text: lang === 'en' ? '🛍️ Shop More' : '🛍️ شراء منتجات أخرى', callback_data: 'show_categories' }
+                ],
+                [
+                  { text: lang === 'en' ? '🔙 Main Menu' : '🔙 القائمة الرئيسية', callback_data: 'back_to_menu' }
+                ]
               ]
-            ]
-          };
+            };
 
-          await bot?.sendMessage(chatId, customerMessage, { 
-            parse_mode: 'HTML',
-            reply_markup: customerKeyboard
-          });
+            await bot?.sendMessage(chatId, customerMessage, { 
+              parse_mode: 'HTML',
+              reply_markup: customerKeyboard
+            });
 
-        } catch (dbErr) {
-          console.error('Database error in receipt submission:', dbErr);
-          bot?.sendMessage(chatId, lang === 'en' ? '❌ Internal error recording order. Please contact support.' : '❌ عذراً، حدث خطأ داخلي أثناء تسجيل طلبك. يرجى التواصل مع الدعم.');
+            // Notify Admin on Telegram with 1-Click Approve/Reject
+            if (TELEGRAM_ADMIN_CHAT_ID && bot) {
+              try {
+                const adminOrderMsg = `🔔 <b>طلب شراء جديد بحاجة للتأكيد والتسليم!</b>\n` +
+                  `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 <b>رقم الطلب:</b> #${orderId}\n` +
+                  `👤 <b>العميل:</b> ${escapeHtml(msg.chat.first_name || 'عميل')} (@${escapeHtml(msg.chat.username || 'لا يوجد')} - <code>${chatId}</code>)\n` +
+                  `📦 <b>المنتج:</b> <b>${escapeHtml(product.name)}</b> (الكمية: ${qty})\n` +
+                  `💰 <b>إجمالي المبلغ:</b> <b>${totalFormatted}</b>\n` +
+                  `💳 <b>بوابة الدفع:</b> ${escapeHtml(wallet?.name || 'محفظة')}\n\n` +
+                  `📸 <i>صورة إيصال التحويل مرفقة بالأسفل. يمكنك القبول والتسليم الفوري بنقرة واحدة:</i>`;
+
+                const adminKeyboard = {
+                  inline_keyboard: [
+                    [
+                      { text: '✅ قبول وتسليم المنتج فوراً', callback_data: `admin_approve_${orderId}` },
+                      { text: '❌ رفض الطلب وتحديد سبب', callback_data: `admin_reject_menu_${orderId}` }
+                    ]
+                  ]
+                };
+
+                if (isPhoto) {
+                  await bot.sendPhoto(TELEGRAM_ADMIN_CHAT_ID, fileId, {
+                    caption: adminOrderMsg,
+                    parse_mode: 'HTML',
+                    reply_markup: adminKeyboard
+                  });
+                } else {
+                  await bot.sendDocument(TELEGRAM_ADMIN_CHAT_ID, fileId, {
+                    caption: adminOrderMsg,
+                    parse_mode: 'HTML',
+                    reply_markup: adminKeyboard
+                  });
+                }
+              } catch (adminErr: any) {
+                console.error('Failed to notify admin on Telegram about order:', adminErr.message);
+              }
+            }
+
+          } catch (dbErr) {
+            console.error('Database error in receipt submission:', dbErr);
+            await bot?.sendMessage(chatId, lang === 'en' ? '❌ Internal error recording order. Please contact support.' : '❌ عذراً، حدث خطأ داخلي أثناء تسجيل طلبك. يرجى التواصل مع الدعم.');
+          }
+          return;
         }
+
+        // 3. Fallback: Photo sent without active awaiting_receipt session
+        const noSessionMsg = lang === 'en'
+          ? `📸 <b>Photo received!</b>\n\nHowever, you do not have an active order or deposit waiting for a payment receipt. Please choose a product or click Deposit balance first:`
+          : `📸 <b>تم استلام الصورة بنجاح!</b>\n\nعذراً، لا يوجد طلب شراء أو شحن رصيد قيد الانتظار حالياً لهذا الحساب. يرجى اختيار المنتج المطلوب وطريقة الدفع أولاً من القائمة أدناه:`;
+
+        const kb = {
+          inline_keyboard: [
+            [{ text: lang === 'en' ? '🛍️ Browse Products' : '🛍️ تصفح وشراء المنتجات', callback_data: 'show_categories' }],
+            [{ text: lang === 'en' ? '💳 Deposit Balance' : '💳 شحن رصيد للمحفظة', callback_data: 'deposit_balance' }],
+            [{ text: lang === 'en' ? '🔙 Main Menu' : '🔙 القائمة الرئيسية', callback_data: 'back_to_menu' }]
+          ]
+        };
+
+        await bot?.sendMessage(chatId, noSessionMsg, { parse_mode: 'HTML', reply_markup: kb });
+        return;
       }
     });
 
@@ -1237,6 +1300,10 @@ function setupBotHandlers(bot: TelegramBot) {
       const user = await getOrCreateUser(query.from);
       const lang = user?.language || 'ar';
       const currency = user?.currency || 'EGP';
+
+      const userSession = await getSession(chatId);
+      const checkout = userSession?.type === 'checkout' ? userSession.data : null;
+      const deposit = userSession?.type === 'deposit' ? userSession.data : null;
 
       // Handle Language and Currency updates
       if (data.startsWith('set_currency_')) {
@@ -1294,7 +1361,7 @@ function setupBotHandlers(bot: TelegramBot) {
 
       // Handle Deposit Balance Flow
       if (data === 'deposit_balance') {
-        depositSessions[chatId] = { step: 'awaiting_amount', createdAt: Date.now() };
+        await setSession(chatId, 'deposit', { step: 'awaiting_amount', createdAt: Date.now() });
         
         const depositPresets = {
           inline_keyboard: [
@@ -1328,15 +1395,13 @@ function setupBotHandlers(bot: TelegramBot) {
       // Handle preset deposit amounts
       if (data.startsWith('dep_amount_')) {
         const amount = parseFloat(data.replace('dep_amount_', ''));
-        const deposit = depositSessions[chatId] || { step: 'awaiting_wallet', createdAt: Date.now() };
-        deposit.amount = amount;
-        deposit.step = 'awaiting_wallet';
-        depositSessions[chatId] = deposit;
+        const depData = { step: 'awaiting_wallet', amount, createdAt: Date.now() };
+        await setSession(chatId, 'deposit', depData);
 
         const wallets = await allQuery<any>('SELECT * FROM wallets');
         if (wallets.length === 0) {
           await bot?.sendMessage(chatId, lang === 'en' ? '❌ Sorry, no payment gateways are active right now.' : '❌ عذراً، لا توجد بوابات دفع مفعلة حالياً.');
-          delete depositSessions[chatId];
+          await clearSession(chatId);
           return;
         }
 
@@ -1364,9 +1429,9 @@ function setupBotHandlers(bot: TelegramBot) {
 
       if (data.startsWith('dep_wallet_')) {
         const walletId = parseInt(data.replace('dep_wallet_', ''));
-        const deposit = depositSessions[chatId];
         if (!deposit || !deposit.amount) {
           await bot?.sendMessage(chatId, lang === 'en' ? '❌ Deposit session expired, please start again.' : '❌ انتهت جلسة الشحن، يرجى البدء من جديد.');
+          await clearSession(chatId);
           return;
         }
 
@@ -1378,6 +1443,7 @@ function setupBotHandlers(bot: TelegramBot) {
 
         deposit.walletId = walletId;
         deposit.step = 'awaiting_receipt';
+        await setSession(chatId, 'deposit', deposit);
 
         const amountFormatted = formatMoney(deposit.amount, currency, lang);
         const instructions = lang === 'en'
@@ -1412,7 +1478,7 @@ function setupBotHandlers(bot: TelegramBot) {
       }
 
       if (data === 'cancel_deposit') {
-        delete depositSessions[chatId];
+        await clearSession(chatId);
         await safeBotEdit(() => bot?.sendMessage(chatId, lang === 'en' ? '❌ Deposit canceled.' : '❌ تم إلغاء عملية شحن الرصيد.'));
         return;
       }
@@ -1654,12 +1720,12 @@ function setupBotHandlers(bot: TelegramBot) {
             return;
           }
 
-          checkoutSessions[chatId] = { 
+          await setSession(chatId, 'checkout', { 
             productId: prodId, 
             step: 'entering_quantity', 
             createdAt: Date.now(), 
             remindersCount: 0 
-          };
+          });
 
           const displayStock = (product.fake_stock && product.fake_stock > 0) ? product.fake_stock : product.stock;
           const availableStockForBtns = product.stock > 0 ? product.stock : 5;
@@ -1733,17 +1799,17 @@ function setupBotHandlers(bot: TelegramBot) {
               const product = await getQuery<any>('SELECT * FROM products WHERE id = ?', [prodId]);
               if (!product) {
                 await bot?.sendMessage(chatId, lang === 'en' ? '❌ Product no longer available.' : '❌ عذراً، لم يعد هذا المنتج متوفراً.');
-                delete checkoutSessions[chatId];
+                await clearSession(chatId);
                 return;
               }
 
-              checkoutSessions[chatId] = {
+              await setSession(chatId, 'checkout', {
                 productId: prodId,
                 quantity: qty,
                 step: 'payment_method',
                 createdAt: Date.now(),
                 remindersCount: 0
-              };
+              });
 
               const userBalance = Number(user?.balance || 0);
               const wallets = await allQuery<any>('SELECT * FROM wallets');
@@ -1778,7 +1844,7 @@ function setupBotHandlers(bot: TelegramBot) {
                   `💰 <b>Total Due:</b> <b>${totalFormatted}</b>\n` +
                   `💳 <b>Your Wallet Balance:</b> <b>${userBalanceFormatted}</b>\n\n` +
                   `👇 <b>Select your payment method below:</b>`
-                : `🧾 <b>فاتورة تأكيد الطلب | INVOICE</b>\n` +
+            : `🧾 <b>فاتورة تأكيد الطلب | INVOICE</b>\n` +
                   `💎 ━━━━━━━━━━━━━━━━━━━━━━ 💎\n\n` +
                   `📦 <b>المنتج:</b> ${escapeHtml(product.name)}\n` +
                   `🔢 <b>الكمية المطلوبة:</b> <b>${qty} قطعة</b>\n` +
@@ -1804,12 +1870,11 @@ function setupBotHandlers(bot: TelegramBot) {
           const product = await getQuery<any>('SELECT * FROM products WHERE id = ?', [prodId]);
           if (!product) {
             await bot?.sendMessage(chatId, lang === 'en' ? '❌ Product no longer available.' : '❌ هذا المنتج لم يعد متوفراً.');
-            delete checkoutSessions[chatId];
+            await clearSession(chatId);
             return;
           }
 
-          const session = checkoutSessions[chatId];
-          const qty = session?.quantity || 1;
+          const qty = checkout?.quantity || 1;
           const totalPrice = Number(product.price) * qty;
 
           const currentBalance = Number(user?.balance || 0);
@@ -1862,7 +1927,7 @@ function setupBotHandlers(bot: TelegramBot) {
           `, [orderId, product.id, product.name, product.price, qty]);
 
           // Clear session
-          delete checkoutSessions[chatId];
+          await clearSession(chatId);
 
           // Deliver product automatically or place into pre-order queue
           const approvalRes = await approveOrder(orderId);
@@ -1899,22 +1964,21 @@ function setupBotHandlers(bot: TelegramBot) {
 
           if (!product || !wallet) {
             await bot?.sendMessage(chatId, lang === 'en' ? '❌ Payment details not found. Please start over.' : '❌ حدث خطأ في استدعاء بيانات الدفع. يرجى البدء من جديد.');
-            delete checkoutSessions[chatId];
+            await clearSession(chatId);
             return;
           }
 
-          const session = checkoutSessions[chatId];
-          const qty = session?.quantity || 1;
+          const qty = checkout?.quantity || 1;
           const totalPrice = product.price * qty;
 
-          checkoutSessions[chatId] = { 
+          await setSession(chatId, 'checkout', { 
             productId: prodId, 
             walletId, 
             quantity: qty,
             step: 'awaiting_receipt', 
             createdAt: Date.now(), 
             remindersCount: 0 
-          };
+          });
 
           const totalFormatted = formatMoney(totalPrice, currency, lang);
           const paymentInstructions = lang === 'en'
@@ -1958,7 +2022,7 @@ function setupBotHandlers(bot: TelegramBot) {
 
       // Cancel checkout session
       else if (data === 'cancel_checkout') {
-        delete checkoutSessions[chatId];
+        await clearSession(chatId);
         await safeBotEdit(() => bot?.sendMessage(chatId, lang === 'en' ? '❌ Checkout canceled.' : '❌ تم إلغاء عملية الشراء. يمكنك إعادة تصفح المنتجات في أي وقت.', {
           reply_markup: {
             inline_keyboard: [

@@ -195,6 +195,13 @@ export async function initDatabase() {
         delivered_items TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS bot_sessions (
+        telegram_user_id BIGINT PRIMARY KEY,
+        session_type TEXT NOT NULL,
+        session_data TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
     `);
 
     try {
@@ -348,6 +355,13 @@ export async function initDatabase() {
         delivered_items TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS bot_sessions (
+        telegram_user_id INTEGER PRIMARY KEY,
+        session_type TEXT NOT NULL,
+        session_data TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     try {
@@ -440,3 +454,45 @@ export async function saveAdminUser(username: string, password: string) {
   await runQuery('DELETE FROM admin_users');
   await runQuery('INSERT INTO admin_users (username, password) VALUES (?, ?)', [username, password]);
 }
+
+export async function getSession(userId: number): Promise<{ type: string; data: any } | null> {
+  try {
+    const row = await getQuery<any>('SELECT session_type, session_data FROM bot_sessions WHERE telegram_user_id = ?', [userId]);
+    if (!row) return null;
+    return { type: row.session_type, data: JSON.parse(row.session_data || '{}') };
+  } catch (err) {
+    console.error('getSession error:', err);
+    return null;
+  }
+}
+
+export async function setSession(userId: number, type: string, data: any): Promise<void> {
+  try {
+    const dataStr = JSON.stringify(data || {});
+    if (isPostgres) {
+      await runQuery(`
+        INSERT INTO bot_sessions (telegram_user_id, session_type, session_data, updated_at)
+        VALUES (?, ?, ?, NOW())
+        ON CONFLICT (telegram_user_id) 
+        DO UPDATE SET session_type = EXCLUDED.session_type, session_data = EXCLUDED.session_data, updated_at = NOW()
+      `, [userId, type, dataStr]);
+    } else {
+      await runQuery(`
+        INSERT INTO bot_sessions (telegram_user_id, session_type, session_data)
+        VALUES (?, ?, ?)
+        ON CONFLICT(telegram_user_id) DO UPDATE SET session_type = excluded.session_type, session_data = excluded.session_data, updated_at = CURRENT_TIMESTAMP
+      `, [userId, type, dataStr]);
+    }
+  } catch (err) {
+    console.error('setSession error:', err);
+  }
+}
+
+export async function clearSession(userId: number): Promise<void> {
+  try {
+    await runQuery('DELETE FROM bot_sessions WHERE telegram_user_id = ?', [userId]);
+  } catch (err) {
+    console.error('clearSession error:', err);
+  }
+}
+
