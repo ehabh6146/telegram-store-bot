@@ -1,0 +1,6 @@
+{
+  "name": "Digital Value Store Dashboard",
+  "description": "لوحة تحكم ذكية وإدارة لمتجر ديجيتال ڤاليو لبيع المنتجات الرقمية مع ربط كامل ببوت تيليجرام للتسليم التلقائي وإدارة المعاملات والمحافظ.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
