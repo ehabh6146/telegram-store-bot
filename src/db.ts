@@ -31,11 +31,12 @@ export async function runQuery(sql: string, params: any[] = []): Promise<{ lastI
     const hasReturning = /RETURNING\s+/i.test(querySql);
 
     if (isInsert && !hasReturning) {
-      querySql = `${querySql} RETURNING id`;
+      querySql = `${querySql} RETURNING *`;
     }
 
     const res = await pool.query(convertSqlForPg(querySql), params);
-    const lastID = res.rows?.[0]?.id ? Number(res.rows[0].id) : 0;
+    const firstRow = res.rows?.[0];
+    const lastID = firstRow ? Number(firstRow.id || firstRow.telegram_user_id || 0) : 0;
     return { lastID, changes: res.rowCount || 0 };
   } else {
     const stmt = sqliteDb.prepare(sql);
