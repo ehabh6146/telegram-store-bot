@@ -1,6 +1,5 @@
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import TelegramBot from 'node-telegram-bot-api';
 import { initDatabase, ensureDatabase, runQuery, allQuery, getQuery, getSettings, saveSettings, getMaintenanceSettings, saveMaintenanceSettings, getAdminUser, saveAdminUser } from '../src/db.js';
 import { findBrandIcon } from '../src/iconLibrary.js';
@@ -3242,17 +3241,19 @@ app.get('/api/provider-orders', async (req, res) => {
 initDatabase().then(startTelegramBot).catch(console.error);
 
 // Vite development integration
-if (process.env.NODE_ENV !== 'production') {
-  createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa'
-  }).then(vite => {
-    app.use(vite.middlewares);
-    app.listen(PORT, () => {
-      console.log(`🚀 Store Dashboard & Server running on http://localhost:${PORT}`);
-    });
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  import('vite').then(({ createServer }) => {
+    createServer({
+      server: { middlewareMode: true },
+      appType: 'spa'
+    }).then(vite => {
+      app.use(vite.middlewares);
+      app.listen(PORT, () => {
+        console.log(`🚀 Store Dashboard & Server running on http://localhost:${PORT}`);
+      });
+    }).catch(console.error);
   }).catch(console.error);
-} else {
+} else if (!process.env.VERCEL) {
   const distPath = path.join(process.cwd(), 'dist');
   app.use(express.static(distPath));
   app.get('*', (req, res) => {
