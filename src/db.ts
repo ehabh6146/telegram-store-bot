@@ -11,7 +11,11 @@ let sqliteDb: any = null;
 if (isPostgres) {
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+    allowExitOnIdle: false
   });
 } else {
   // Use local SQLite database file
@@ -65,19 +69,26 @@ export async function getQuery<T = any>(sql: string, params: any[] = []): Promis
   }
 }
 
+let dbInitialized = false;
 let initDbPromise: Promise<void> | null = null;
 
 export async function ensureDatabase(): Promise<void> {
+  if (dbInitialized) return;
   if (!initDbPromise) {
-    initDbPromise = initDatabase().catch(err => {
-      initDbPromise = null;
-      throw err;
-    });
+    initDbPromise = initDatabase()
+      .then(() => {
+        dbInitialized = true;
+      })
+      .catch(err => {
+        initDbPromise = null;
+        throw err;
+      });
   }
   return initDbPromise;
 }
 
 export async function initDatabase() {
+  if (dbInitialized) return;
   console.log(`Running database initialization (Engine: ${isPostgres ? 'PostgreSQL' : 'SQLite Local'})...`);
   
   if (isPostgres) {
@@ -222,6 +233,12 @@ export async function initDatabase() {
         ALTER TABLE payment_proofs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
         ALTER TABLE settings ADD COLUMN IF NOT EXISTS maintenance_mode BOOLEAN DEFAULT FALSE;
         ALTER TABLE settings ADD COLUMN IF NOT EXISTS maintenance_message TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_orders_user ON orders (telegram_user_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status);
+        CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items (order_id);
+        CREATE INDEX IF NOT EXISTS idx_products_cat ON products (category_id);
+        CREATE INDEX IF NOT EXISTS idx_balance_deposits_user ON balance_deposits (telegram_user_id);
       `);
     } catch (err) {
       // Ignored
@@ -402,14 +419,27 @@ export async function initDatabase() {
   console.log('Database tables verified/created successfully.');
 }
 
-export async function getSettings(): Promise<{ 
+let cachedSettings: any = null;
+let lastSettingsFetch = 0;
+
+export async function getSettings(forceRefresh = false): Promise<{ 
   telegram_bot_token?: string; 
   telegram_admin_chat_id?: string;
   maintenance_mode?: boolean | number;
   maintenance_message?: string;
 }> {
-  const row = await getQuery<any>('SELECT * FROM settings LIMIT 1');
-  return row || {};
+  const now = Date.now();
+  if (!forceRefresh && cachedSettings && (now - lastSettingsFetch < 30000)) {
+    return cachedSettings;
+  }
+  try {
+    const row = await getQuery<any>('SELECT * FROM settings LIMIT 1');
+    cachedSettings = row || {};
+    lastSettingsFetch = now;
+    return cachedSettings;
+  } catch (e) {
+    return cachedSettings || {};
+  }
 }
 
 export async function saveSettings(token: string, adminChatId: string) {
@@ -418,13 +448,15 @@ export async function saveSettings(token: string, adminChatId: string) {
   const mMsg = current.maintenance_message || '🛠️ عذراً، البوت قيد الصيانة والتطوير حالياً لتحسين خدماتنا. سنعود للعمل قريباً جداً! 🙏';
   await runQuery('DELETE FROM settings');
   await runQuery('INSERT INTO settings (telegram_bot_token, telegram_admin_chat_id, maintenance_mode, maintenance_message) VALUES (?, ?, ?, ?)', [token, adminChatId, mMode, mMsg]);
+  cachedSettings = { telegram_bot_token: token, telegram_admin_chat_id: adminChatId, maintenance_mode: mMode, maintenance_message: mMsg };
+  lastSettingsFetch = Date.now();
 }
 
-export async function getMaintenanceSettings(): Promise<{ maintenance_mode: boolean; maintenance_message: string }> {
-  const row = await getQuery<any>('SELECT maintenance_mode, maintenance_message FROM settings LIMIT 1');
+export async function getMaintenanceSettings(forceRefresh = false): Promise<{ maintenance_mode: boolean; maintenance_message: string }> {
+  const settings = await getSettings(forceRefresh);
   return {
-    maintenance_mode: Boolean(row?.maintenance_mode),
-    maintenance_message: row?.maintenance_message || '🛠️ عذراً، البوت قيد الصيانة والتطوير حالياً لتحسين خدماتنا. سنعود للعمل قريباً جداً! 🙏'
+    maintenance_mode: Boolean(settings?.maintenance_mode),
+    maintenance_message: settings?.maintenance_message || '🛠️ عذراً، البوت قيد الصيانة والتطوير حالياً لتحسين خدماتنا. سنعود للعمل قريباً جداً! 🙏'
   };
 }
 
@@ -439,6 +471,8 @@ export async function saveMaintenanceSettings(enabled: boolean, message: string)
     Boolean(enabled),
     message
   ]);
+  cachedSettings = { telegram_bot_token: token, telegram_admin_chat_id: adminChatId, maintenance_mode: Boolean(enabled), maintenance_message: message };
+  lastSettingsFetch = Date.now();
 }
 
 export async function getAdminUser() {

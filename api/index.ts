@@ -17,23 +17,10 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Ensure database tables are created on any incoming request
-app.use(async (req, res, next) => {
-  try {
-    await ensureDatabase();
-  } catch (err) {
-    console.error('ensureDatabase error:', err);
-  }
-  next();
-});
-
 // Telegram Webhook Endpoint
 app.post(`/api/telegram-webhook`, async (req, res) => {
   try {
-    await ensureDatabase();
-    const currentHost = (req.headers['x-forwarded-host'] as string) || req.headers.host;
-    const hostUrl = currentHost ? `https://${currentHost}` : undefined;
-    const b = await ensureBot(hostUrl);
+    const b = ensureBotFast();
     if (b && req.body) {
       await b.processUpdate(req.body);
     }
@@ -600,6 +587,34 @@ async function notifyRestock(productId: number, productName: string, price: numb
 let botInitializingPromise: Promise<TelegramBot | null> | null = null;
 let webhookRegisteredUrl = '';
 
+function ensureBotFast(): TelegramBot | null {
+  if (bot) return bot;
+  if (!TELEGRAM_BOT_TOKEN) return null;
+  bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+  botStatus = 'Active';
+  setupBotHandlers(bot);
+
+  // Sync settings and bot info in the background without blocking
+  getSettings().then(settings => {
+    if (settings.telegram_bot_token && settings.telegram_bot_token !== TELEGRAM_BOT_TOKEN) {
+      TELEGRAM_BOT_TOKEN = settings.telegram_bot_token;
+    }
+    if (settings.telegram_admin_chat_id) {
+      TELEGRAM_ADMIN_CHAT_ID = settings.telegram_admin_chat_id;
+    }
+  }).catch(() => {});
+
+  bot.getMe().then(me => {
+    botUsername = me.username || '';
+    botStatus = 'Active';
+    botError = '';
+  }).catch(err => {
+    botError = err.message || '';
+  });
+
+  return bot;
+}
+
 // Initialize Telegram Bot
 async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | null> {
   try {
@@ -614,9 +629,7 @@ async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | nu
     if (bot) {
       try {
         bot.stopPolling();
-      } catch (e) {
-        console.error('Error stopping previous bot instance:', e);
-      }
+      } catch (e) {}
       bot = null;
     }
 
@@ -628,7 +641,6 @@ async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | nu
     if (!TELEGRAM_BOT_TOKEN) {
       botStatus = 'Error';
       botError = 'Token is missing';
-      console.error('Telegram Bot Token is missing. Bot is offline.');
       return null;
     }
 
@@ -664,14 +676,11 @@ async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | nu
     }).catch(err => {
       botStatus = 'Unauthorized';
       botError = err.message || 'Invalid Bot Token';
-      console.error('Failed to connect bot:', err.message);
     });
 
     if (!process.env.VERCEL) {
-      // Periodic background task to check and fulfill pending provider pre-orders
       reminderIntervalId = setInterval(async () => {
         if (!bot || botStatus !== 'Active') return;
-        // Check and fulfill any pending provider pre-orders silently
         checkAndFulfillPendingProviderOrders().catch(console.error);
       }, 60000);
     }
@@ -685,21 +694,8 @@ async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | nu
 }
 
 async function ensureBot(hostOverride?: string): Promise<TelegramBot | null> {
-  if (bot) {
-    if (hostOverride && !webhookRegisteredUrl) {
-      const fullWebhookUrl = `${hostOverride.replace(/\/$/, '')}/api/telegram-webhook`;
-      bot.setWebHook(fullWebhookUrl).then(() => {
-        webhookRegisteredUrl = fullWebhookUrl;
-      }).catch(err => console.error('ensureBot setWebHook error:', err.message));
-    }
-    return bot;
-  }
-  if (!botInitializingPromise) {
-    botInitializingPromise = startTelegramBot(hostOverride).finally(() => {
-      botInitializingPromise = null;
-    });
-  }
-  return await botInitializingPromise;
+  if (bot) return bot;
+  return ensureBotFast();
 }
 
 function setupBotHandlers(bot: TelegramBot) {
