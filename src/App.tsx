@@ -298,6 +298,7 @@ export default function App() {
 
   const [botForm, setBotForm] = useState({ token: '', adminChatId: '' });
   const [botMessage, setBotMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [testingWebhook, setTestingWebhook] = useState(false);
 
   const [approvingOrderId, setApprovingOrderId] = useState<number | null>(null);
   const [customAlert, setCustomAlert] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
@@ -1061,6 +1062,31 @@ export default function App() {
       }
     } catch (err: any) {
       setBotMessage({ type: 'error', text: `فشل الاتصال بالخادم: ${err.message || 'يرجى التحقق من اتصال الشبكة'}` });
+    }
+  };
+
+  const handleSetupWebhook = async () => {
+    setTestingWebhook(true);
+    setBotMessage(null);
+    try {
+      const res = await fetch(`/api/setup-webhook?host=${encodeURIComponent(window.location.host)}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setBotMessage({
+          type: 'success',
+          text: `✅ تم تفعيل وربط الويب هوك بنجاح! البوت @${data.botUsername || ''} متصل ومستعد لاستقبال الأوامر فوراً.`
+        });
+        fetchBotStatus();
+      } else {
+        setBotMessage({
+          type: 'error',
+          text: `❌ فشل إعداد الويب هوك: ${data.error || 'يرجى التحقق من التوكن'}`
+        });
+      }
+    } catch (err: any) {
+      setBotMessage({ type: 'error', text: `فشل الاتصال: ${err.message || 'خطأ غير معروف'}` });
+    } finally {
+      setTestingWebhook(false);
     }
   };
 
@@ -2800,7 +2826,17 @@ export default function App() {
                       <span className="text-[10px] text-slate-500 mt-1 block">هذا هو الرقم الفريد لدردشتك في تيليجرام والذي سيرسل إليه البوت تفاصيل المشتريات فورا بمجرد رفع العميل لإيصال التحويل!</span>
                     </div>
 
-                    <div className="pt-4 flex justify-end">
+                    <div className="pt-4 flex flex-wrap items-center justify-between gap-3">
+                      <button
+                        type="button"
+                        onClick={handleSetupWebhook}
+                        disabled={testingWebhook}
+                        className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-indigo-400 hover:text-indigo-300 border border-slate-700 rounded-xl text-xs font-bold transition-all flex items-center gap-2"
+                      >
+                        <Zap className={`w-4 h-4 ${testingWebhook ? 'animate-spin' : ''}`} />
+                        <span>{testingWebhook ? 'جاري الفحص والربط...' : '⚡ تفعيل وربط Webhook البوت الآن'}</span>
+                      </button>
+
                       <button 
                         type="submit" 
                         className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"

@@ -28,9 +28,20 @@ app.use(async (req, res, next) => {
 });
 
 // Telegram Webhook Endpoint
-app.post(`/api/telegram-webhook`, (req, res) => {
-  bot?.processUpdate(req.body);
-  res.sendStatus(200);
+app.post(`/api/telegram-webhook`, async (req, res) => {
+  try {
+    await ensureDatabase();
+    const currentHost = (req.headers['x-forwarded-host'] as string) || req.headers.host;
+    const hostUrl = currentHost ? `https://${currentHost}` : undefined;
+    const b = await ensureBot(hostUrl);
+    if (b && req.body) {
+      await b.processUpdate(req.body);
+    }
+    res.status(200).send('OK');
+  } catch (err: any) {
+    console.error('Telegram webhook handler error:', err);
+    res.status(200).send('ERROR');
+  }
 });
 
 const PORT = process.env.PORT || 3000;
@@ -604,10 +615,13 @@ async function notifyRestock(productId: number, productName: string, price: numb
   }
 }
 
+let botInitializingPromise: Promise<TelegramBot | null> | null = null;
+let webhookRegisteredUrl = '';
+
 // Initialize Telegram Bot
-function startTelegramBot() {
-  const savedSettings = getSettings().catch(() => ({} as any));
-  savedSettings.then((settings: any) => {
+async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | null> {
+  try {
+    const settings = await getSettings().catch(() => ({} as any));
     if (settings.telegram_bot_token) {
       TELEGRAM_BOT_TOKEN = settings.telegram_bot_token;
     }
@@ -621,6 +635,7 @@ function startTelegramBot() {
       } catch (e) {
         console.error('Error stopping previous bot instance:', e);
       }
+      bot = null;
     }
 
     if (reminderIntervalId) {
@@ -632,20 +647,28 @@ function startTelegramBot() {
       botStatus = 'Error';
       botError = 'Token is missing';
       console.error('Telegram Bot Token is missing. Bot is offline.');
-      return;
+      return null;
     }
 
-    const webhookHost = process.env.APP_URL || (process.env.VERCEL_URL ? (process.env.VERCEL_URL.startsWith('http') ? process.env.VERCEL_URL : `https://${process.env.VERCEL_URL}`) : '');
+    let webhookHost = hostOverride || process.env.APP_URL || (process.env.VERCEL_URL ? (process.env.VERCEL_URL.startsWith('http') ? process.env.VERCEL_URL : `https://${process.env.VERCEL_URL}`) : '');
+    if (webhookHost && !webhookHost.startsWith('http')) {
+      webhookHost = `https://${webhookHost}`;
+    }
 
-    if (webhookHost) {
+    if (process.env.VERCEL || webhookHost) {
       bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
-      bot.setWebHook(`${webhookHost}/api/telegram-webhook`).catch(err => {
-        console.error('Webhook configuration error:', err.message);
-      });
-      console.log('Bot running in Webhook mode on:', webhookHost);
-    } else if (process.env.VERCEL) {
-      bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
-      console.log('Bot running in Serverless webhook mode on Vercel.');
+      if (webhookHost) {
+        const fullWebhookUrl = `${webhookHost.replace(/\/$/, '')}/api/telegram-webhook`;
+        if (webhookRegisteredUrl !== fullWebhookUrl) {
+          bot.setWebHook(fullWebhookUrl).then(() => {
+            webhookRegisteredUrl = fullWebhookUrl;
+            console.log('✅ Webhook successfully registered at:', fullWebhookUrl);
+          }).catch(err => {
+            console.error('Webhook configuration error:', err.message);
+          });
+        }
+      }
+      console.log('Bot running in Webhook mode on:', webhookHost || 'Vercel Serverless');
     } else {
       bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
       console.log('Bot running in Long Polling mode for local/dev environment.');
@@ -671,24 +694,51 @@ function startTelegramBot() {
       }, 60000);
     }
 
-    // Handle bot polling errors
-    bot.on('polling_error', (err: any) => {
-      const errMsg = err.message || '';
-      console.error('Telegram Bot Polling Error:', errMsg);
-      if (errMsg.includes('409') || errMsg.toLowerCase().includes('conflict')) {
-        botStatus = 'Error';
-        botError = 'خطأ 409: هناك نسخة أخرى من البوت تعمل بنفس التوكن حالياً.';
-      } else if (errMsg.includes('401') || errMsg.toLowerCase().includes('unauthorized')) {
-        botStatus = 'Unauthorized';
-        botError = '401 Unauthorized: يرجى التحقق من توكن البوت وتحديثه في الإعدادات.';
-        try {
-          bot?.stopPolling();
-        } catch (stopErr) {}
-      }
-    });
+    setupBotHandlers(bot);
+    return bot;
+  } catch (err: any) {
+    console.error('startTelegramBot error:', err);
+    return null;
+  }
+}
 
-    // 1. Start Command / Main Menu
-    bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+async function ensureBot(hostOverride?: string): Promise<TelegramBot | null> {
+  if (bot) {
+    if (hostOverride && !webhookRegisteredUrl) {
+      const fullWebhookUrl = `${hostOverride.replace(/\/$/, '')}/api/telegram-webhook`;
+      bot.setWebHook(fullWebhookUrl).then(() => {
+        webhookRegisteredUrl = fullWebhookUrl;
+      }).catch(err => console.error('ensureBot setWebHook error:', err.message));
+    }
+    return bot;
+  }
+  if (!botInitializingPromise) {
+    botInitializingPromise = startTelegramBot(hostOverride).finally(() => {
+      botInitializingPromise = null;
+    });
+  }
+  return await botInitializingPromise;
+}
+
+function setupBotHandlers(bot: TelegramBot) {
+  // Handle bot polling errors
+  bot.on('polling_error', (err: any) => {
+    const errMsg = err.message || '';
+    console.error('Telegram Bot Polling Error:', errMsg);
+    if (errMsg.includes('409') || errMsg.toLowerCase().includes('conflict')) {
+      botStatus = 'Error';
+      botError = 'خطأ 409: هناك نسخة أخرى من البوت تعمل بنفس التوكن حالياً.';
+    } else if (errMsg.includes('401') || errMsg.toLowerCase().includes('unauthorized')) {
+      botStatus = 'Unauthorized';
+      botError = '401 Unauthorized: يرجى التحقق من توكن البوت وتحديثه في الإعدادات.';
+      try {
+        bot?.stopPolling();
+      } catch (stopErr) {}
+    }
+  });
+
+  // 1. Start Command / Main Menu
+  bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
       const chatId = msg.chat.id;
       if (await isMaintenanceActive(chatId)) return;
 
@@ -2205,8 +2255,6 @@ function startTelegramBot() {
         }
       }
     });
-
-  }).catch(console.error);
 }
 
 // REST API Endpoints
@@ -2220,6 +2268,33 @@ app.get('/api/status', (req, res) => {
     tokenPreview: TELEGRAM_BOT_TOKEN ? `${TELEGRAM_BOT_TOKEN.substring(0, 10)}...` : '',
     adminChatId: TELEGRAM_ADMIN_CHAT_ID
   });
+});
+
+// Setup and check Telegram Webhook
+app.get('/api/setup-webhook', async (req, res) => {
+  try {
+    await ensureDatabase();
+    const host = (req.query.host as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host;
+    const hostUrl = host ? (host.startsWith('http') ? host : `https://${host}`) : '';
+    const b = await ensureBot(hostUrl);
+    if (!b) {
+      return res.status(400).json({ error: 'Bot is not configured or token is invalid.', botStatus, botError });
+    }
+    const webhookUrl = `${hostUrl.replace(/\/$/, '')}/api/telegram-webhook`;
+    const setRes = await b.setWebHook(webhookUrl);
+    const info = await b.getWebHookInfo();
+    const me = await b.getMe().catch(e => ({ username: 'unknown' } as any));
+    res.json({
+      success: true,
+      botUsername: me.username,
+      webhookUrl,
+      setRes,
+      info
+    });
+  } catch (err: any) {
+    console.error('setup-webhook error:', err);
+    res.status(500).json({ error: err.message || err });
+  }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -2275,7 +2350,9 @@ app.post('/api/bot-config', async (req, res) => {
     if (adminChatId) TELEGRAM_ADMIN_CHAT_ID = adminChatId;
     await saveSettings(token || TELEGRAM_BOT_TOKEN, adminChatId || TELEGRAM_ADMIN_CHAT_ID);
     try {
-      startTelegramBot();
+      const currentHost = (req.headers['x-forwarded-host'] as string) || req.headers.host;
+      const hostUrl = currentHost ? `https://${currentHost}` : undefined;
+      await startTelegramBot(hostUrl);
     } catch (botErr) {
       console.error('Error starting telegram bot:', botErr);
     }
@@ -2286,9 +2363,11 @@ app.post('/api/bot-config', async (req, res) => {
   }
 });
 
-app.post('/api/restart-bot', (req, res) => {
+app.post('/api/restart-bot', async (req, res) => {
   try {
-    startTelegramBot();
+    const currentHost = (req.headers['x-forwarded-host'] as string) || req.headers.host;
+    const hostUrl = currentHost ? `https://${currentHost}` : undefined;
+    await startTelegramBot(hostUrl);
     res.json({
       message: 'restarting...',
       botStatus,
@@ -3260,7 +3339,7 @@ app.get('/api/provider-orders', async (req, res) => {
 });
 
 // Initialize DB and start App
-initDatabase().then(startTelegramBot).catch(console.error);
+initDatabase().then(() => startTelegramBot()).catch(console.error);
 
 // Vite development integration
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
