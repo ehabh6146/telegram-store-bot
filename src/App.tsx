@@ -1069,13 +1069,22 @@ export default function App() {
     setTestingWebhook(true);
     setBotMessage(null);
     try {
-      const res = await fetch(`/api/setup-webhook?host=${encodeURIComponent(window.location.host)}`);
+      const res = await fetch('/api/setup-webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: window.location.host,
+          token: botForm.token ? botForm.token.trim() : undefined,
+          adminChatId: botForm.adminChatId ? botForm.adminChatId.trim() : undefined
+        })
+      });
       const data = await res.json();
       if (res.ok && data.success) {
         setBotMessage({
           type: 'success',
           text: `✅ تم تفعيل وربط الويب هوك بنجاح! البوت @${data.botUsername || ''} متصل ومستعد لاستقبال الأوامر فوراً.`
         });
+        setBotForm({ token: '', adminChatId: botForm.adminChatId });
         fetchBotStatus();
       } else {
         setBotMessage({
@@ -2804,11 +2813,12 @@ export default function App() {
                       </label>
                       <input 
                         type="text" 
+                        dir="ltr"
                         required={botConfig.tokenPreview === 'None'}
                         placeholder={botConfig.tokenPreview !== 'None' ? "اترك هذا الحقل فارغاً للاحتفاظ بالتوكن الحالي" : "أدخل توكن البوت هنا، مثال: 8592830117:AAG..."}
                         value={botForm.token}
-                        onChange={e => setBotForm({ ...botForm, token: e.target.value })}
-                        className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs font-medium font-mono text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        onChange={e => setBotForm({ ...botForm, token: e.target.value.trim() })}
+                        className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs font-medium font-mono text-left text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                       />
                       <span className="text-[10px] text-slate-500 mt-1 block">ملاحظة للتأمين: سيتم تخزين وإخفاء التوكن من لوحة التحكم، وسيظهر مشفراً (المحفوظ حالياً: {botConfig.tokenPreview}).</span>
                     </div>
@@ -2817,11 +2827,12 @@ export default function App() {
                       <label className="block text-xs font-semibold text-slate-300 mb-1.5">معرف المشرف المسؤول عن استلاف الطلبات (Admin Chat ID) *</label>
                       <input 
                         type="text" 
+                        dir="ltr"
                         required
                         placeholder="أدخل معرف الشات الخاص بحسابك، مثال: 5626127409"
                         value={botForm.adminChatId}
-                        onChange={e => setBotForm({ ...botForm, adminChatId: e.target.value })}
-                        className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs font-medium font-mono text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        onChange={e => setBotForm({ ...botForm, adminChatId: e.target.value.trim() })}
+                        className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs font-medium font-mono text-left text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                       />
                       <span className="text-[10px] text-slate-500 mt-1 block">هذا هو الرقم الفريد لدردشتك في تيليجرام والذي سيرسل إليه البوت تفاصيل المشتريات فورا بمجرد رفع العميل لإيصال التحويل!</span>
                     </div>

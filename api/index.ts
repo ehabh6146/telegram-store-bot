@@ -2331,19 +2331,42 @@ app.get('/api/status', (req, res) => {
 });
 
 // Setup and check Telegram Webhook
-app.get('/api/setup-webhook', async (req, res) => {
+app.all('/api/setup-webhook', async (req, res) => {
   try {
     await ensureDatabase();
-    const host = (req.query.host as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host;
-    const hostUrl = host ? (host.startsWith('http') ? host : `https://${host}`) : '';
-    const b = await ensureBot(hostUrl);
-    if (!b) {
-      return res.status(400).json({ error: 'Bot is not configured or token is invalid.', botStatus, botError });
+    const token = ((req.body?.token || req.query?.token) as string)?.trim();
+    const adminChatId = ((req.body?.adminChatId || req.query?.adminChatId) as string)?.trim();
+
+    if (token) {
+      TELEGRAM_BOT_TOKEN = token;
+      await saveSettings(token, adminChatId || TELEGRAM_ADMIN_CHAT_ID);
+    } else if (adminChatId) {
+      TELEGRAM_ADMIN_CHAT_ID = adminChatId;
+      await saveSettings(TELEGRAM_BOT_TOKEN, adminChatId);
     }
-    const webhookUrl = `${hostUrl.replace(/\/$/, '')}/api/telegram-webhook`;
-    const setRes = await b.setWebHook(webhookUrl);
-    const info = await b.getWebHookInfo();
-    const me = await b.getMe().catch(e => ({ username: 'unknown' } as any));
+
+    const host = (req.body?.host as string) || (req.query?.host as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host;
+    const hostUrl = host ? (host.startsWith('http') ? host : `https://${host}`) : '';
+
+    const b = await startTelegramBot(hostUrl);
+    if (!b) {
+      return res.status(400).json({ error: 'لم يتم تفعيل البوت أو أن التوكن غير صالح.', botStatus, botError });
+    }
+
+    const me = await b.getMe();
+    botUsername = me.username || '';
+    botStatus = 'Active';
+
+    let webhookUrl = '';
+    let setRes: any = true;
+    let info: any = null;
+
+    if (hostUrl) {
+      webhookUrl = `${hostUrl.replace(/\/$/, '')}/api/telegram-webhook`;
+      setRes = await b.setWebHook(webhookUrl);
+      info = await b.getWebHookInfo();
+    }
+
     res.json({
       success: true,
       botUsername: me.username,
