@@ -64,6 +64,18 @@ export async function getQuery<T = any>(sql: string, params: any[] = []): Promis
   }
 }
 
+let initDbPromise: Promise<void> | null = null;
+
+export async function ensureDatabase(): Promise<void> {
+  if (!initDbPromise) {
+    initDbPromise = initDatabase().catch(err => {
+      initDbPromise = null;
+      throw err;
+    });
+  }
+  return initDbPromise;
+}
+
 export async function initDatabase() {
   console.log(`Running database initialization (Engine: ${isPostgres ? 'PostgreSQL' : 'SQLite Local'})...`);
   
@@ -206,6 +218,13 @@ export async function initDatabase() {
     } catch (err) {
       // Ignored
     }
+
+    try {
+      const adminCheck = await pool.query('SELECT * FROM admin_users LIMIT 1');
+      if (!adminCheck.rows || adminCheck.rows.length === 0) {
+        await pool.query("INSERT INTO admin_users (username, password) VALUES ('admin', 'admin123')");
+      }
+    } catch (e) {}
   } else {
     // SQLite Tables
     sqliteDb.exec(`
