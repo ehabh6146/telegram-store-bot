@@ -12,10 +12,10 @@ if (isPostgres) {
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
-    max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
-    allowExitOnIdle: false
+    max: 15,
+    idleTimeoutMillis: 60000,
+    connectionTimeoutMillis: 30000,
+    keepAlive: true
   });
 } else {
   // Use local SQLite database file
@@ -28,20 +28,35 @@ function convertSqlForPg(sql: string): string {
   return sql.replace(/\?/g, () => `$${i++}`);
 }
 
+async function withRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (retries > 0 && (err.message?.includes('timeout') || err.message?.includes('terminated') || err.message?.includes('ECONNRESET') || err.code === '57P01')) {
+      console.warn(`Database connection busy or waking up, retrying query... (${retries} attempts left)`);
+      await new Promise(r => setTimeout(r, 800));
+      return withRetry(fn, retries - 1);
+    }
+    throw err;
+  }
+}
+
 export async function runQuery(sql: string, params: any[] = []): Promise<{ lastID: number; changes: number }> {
   if (isPostgres) {
-    let querySql = sql.trim();
-    const isInsert = /^INSERT\s+INTO/i.test(querySql);
-    const hasReturning = /RETURNING\s+/i.test(querySql);
+    return withRetry(async () => {
+      let querySql = sql.trim();
+      const isInsert = /^INSERT\s+INTO/i.test(querySql);
+      const hasReturning = /RETURNING\s+/i.test(querySql);
 
-    if (isInsert && !hasReturning) {
-      querySql = `${querySql} RETURNING *`;
-    }
+      if (isInsert && !hasReturning) {
+        querySql = `${querySql} RETURNING *`;
+      }
 
-    const res = await pool.query(convertSqlForPg(querySql), params);
-    const firstRow = res.rows?.[0];
-    const lastID = firstRow ? Number(firstRow.id || firstRow.telegram_user_id || 0) : 0;
-    return { lastID, changes: res.rowCount || 0 };
+      const res = await pool.query(convertSqlForPg(querySql), params);
+      const firstRow = res.rows?.[0];
+      const lastID = firstRow ? Number(firstRow.id || firstRow.telegram_user_id || 0) : 0;
+      return { lastID, changes: res.rowCount || 0 };
+    });
   } else {
     const stmt = sqliteDb.prepare(sql);
     const info = stmt.run(...params);
@@ -51,8 +66,10 @@ export async function runQuery(sql: string, params: any[] = []): Promise<{ lastI
 
 export async function allQuery<T = any>(sql: string, params: any[] = []): Promise<T[]> {
   if (isPostgres) {
-    const res = await pool.query(convertSqlForPg(sql), params);
-    return res.rows;
+    return withRetry(async () => {
+      const res = await pool.query(convertSqlForPg(sql), params);
+      return res.rows;
+    });
   } else {
     const stmt = sqliteDb.prepare(sql);
     return stmt.all(...params) as T[];
@@ -61,8 +78,10 @@ export async function allQuery<T = any>(sql: string, params: any[] = []): Promis
 
 export async function getQuery<T = any>(sql: string, params: any[] = []): Promise<T | undefined> {
   if (isPostgres) {
-    const res = await pool.query(convertSqlForPg(sql), params);
-    return res.rows[0];
+    return withRetry(async () => {
+      const res = await pool.query(convertSqlForPg(sql), params);
+      return res.rows[0];
+    });
   } else {
     const stmt = sqliteDb.prepare(sql);
     return stmt.get(...params) as T | undefined;
