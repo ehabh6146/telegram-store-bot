@@ -625,14 +625,17 @@ function startTelegramBot() {
       return;
     }
 
-    const isHttps = process.env.APP_URL && process.env.APP_URL.startsWith('https://');
+    const webhookHost = process.env.APP_URL || (process.env.VERCEL_URL ? (process.env.VERCEL_URL.startsWith('http') ? process.env.VERCEL_URL : `https://${process.env.VERCEL_URL}`) : '');
 
-    if (isHttps) {
+    if (webhookHost) {
       bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
-      bot.setWebHook(`${process.env.APP_URL}/api/telegram-webhook`).catch(err => {
+      bot.setWebHook(`${webhookHost}/api/telegram-webhook`).catch(err => {
         console.error('Webhook configuration error:', err.message);
       });
-      console.log('Bot running in Webhook mode on:', process.env.APP_URL);
+      console.log('Bot running in Webhook mode on:', webhookHost);
+    } else if (process.env.VERCEL) {
+      bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+      console.log('Bot running in Serverless webhook mode on Vercel.');
     } else {
       bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
       console.log('Bot running in Long Polling mode for local/dev environment.');
@@ -649,12 +652,14 @@ function startTelegramBot() {
       console.error('Failed to connect bot:', err.message);
     });
 
-    // Periodic background task to check and fulfill pending provider pre-orders
-    reminderIntervalId = setInterval(async () => {
-      if (!bot || botStatus !== 'Active') return;
-      // Check and fulfill any pending provider pre-orders silently
-      checkAndFulfillPendingProviderOrders().catch(console.error);
-    }, 60000);
+    if (!process.env.VERCEL) {
+      // Periodic background task to check and fulfill pending provider pre-orders
+      reminderIntervalId = setInterval(async () => {
+        if (!bot || botStatus !== 'Active') return;
+        // Check and fulfill any pending provider pre-orders silently
+        checkAndFulfillPendingProviderOrders().catch(console.error);
+      }, 60000);
+    }
 
     // Handle bot polling errors
     bot.on('polling_error', (err: any) => {
@@ -2256,10 +2261,17 @@ app.post('/api/bot-config', async (req, res) => {
   }
 
   try {
-    await saveSettings(token, adminChatId);
-    startTelegramBot();
+    if (token) TELEGRAM_BOT_TOKEN = token;
+    if (adminChatId) TELEGRAM_ADMIN_CHAT_ID = adminChatId;
+    await saveSettings(token || TELEGRAM_BOT_TOKEN, adminChatId || TELEGRAM_ADMIN_CHAT_ID);
+    try {
+      startTelegramBot();
+    } catch (botErr) {
+      console.error('Error starting telegram bot:', botErr);
+    }
     res.json({ success: true });
   } catch (err: any) {
+    console.error('Error saving bot-config:', err);
     res.status(500).json({ error: err.message });
   }
 });
