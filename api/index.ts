@@ -715,11 +715,11 @@ function setupBotHandlers(bot: TelegramBot) {
 
   // 1. Start Command / Main Menu
   bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+    try {
       const chatId = msg.chat.id;
       if (await isMaintenanceActive(chatId)) return;
 
-      delete checkoutSessions[chatId];
-      delete depositSessions[chatId];
+      await clearSession(chatId);
 
       let referredBy: number | undefined;
       const startParam = match?.[1]?.trim();
@@ -784,7 +784,10 @@ function setupBotHandlers(bot: TelegramBot) {
         parse_mode: 'HTML',
         reply_markup: inlineQuickMenu
       });
-    });
+    } catch (err: any) {
+      console.error('Error in /start handler:', err);
+    }
+  });
 
     // Handle text messages
     bot.on('message', async (msg) => {
