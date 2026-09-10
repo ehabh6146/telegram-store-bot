@@ -5,7 +5,17 @@ import { initDatabase, ensureDatabase, runQuery, allQuery, getQuery, getSettings
 import { findBrandIcon } from '../src/iconLibrary.js';
 
 const app = express();
+app.set('etag', false);
 app.use(express.json());
+
+// Disable caching for live API data (avoids 304 Not Modified and guarantees 200 OK)
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  next();
+});
 
 // Ensure database tables are created on any incoming request
 app.use(async (req, res, next) => {
