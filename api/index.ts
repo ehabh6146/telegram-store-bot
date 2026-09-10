@@ -22,7 +22,20 @@ app.post(`/api/telegram-webhook`, async (req, res) => {
   try {
     const b = await getTelegramBot();
     if (b && req.body) {
-      await b.processUpdate(req.body);
+      if (req.body.message) {
+        const msg = req.body.message;
+        const text = msg.text || '';
+        if (text.startsWith('/start')) {
+          const match = text.match(/\/start(?:\s+(.+))?/);
+          await handleStartCommand(b, msg, match);
+        } else {
+          await handleMessage(b, msg);
+        }
+      } else if (req.body.callback_query) {
+        await handleCallbackQuery(b, req.body.callback_query);
+      } else {
+        await b.processUpdate(req.body);
+      }
     }
     res.status(200).send('OK');
   } catch (err: any) {
@@ -735,31 +748,13 @@ async function startTelegramBot(hostOverride?: string): Promise<TelegramBot | nu
 
 async function ensureBot(hostOverride?: string): Promise<TelegramBot | null> {
   if (bot) return bot;
-  return ensureBotFast();
+  return await getTelegramBot();
 }
 
-function setupBotHandlers(bot: TelegramBot) {
-  // Handle bot polling errors
-  bot.on('polling_error', (err: any) => {
-    const errMsg = err.message || '';
-    console.error('Telegram Bot Polling Error:', errMsg);
-    if (errMsg.includes('409') || errMsg.toLowerCase().includes('conflict')) {
-      botStatus = 'Error';
-      botError = 'خطأ 409: هناك نسخة أخرى من البوت تعمل بنفس التوكن حالياً.';
-    } else if (errMsg.includes('401') || errMsg.toLowerCase().includes('unauthorized')) {
-      botStatus = 'Unauthorized';
-      botError = '401 Unauthorized: يرجى التحقق من توكن البوت وتحديثه في الإعدادات.';
-      try {
-        bot?.stopPolling();
-      } catch (stopErr) {}
-    }
-  });
-
-  // 1. Start Command / Main Menu
-  bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
-    try {
-      const chatId = msg.chat.id;
-      if (await isMaintenanceActive(chatId)) return;
+async function handleStartCommand(b: TelegramBot, msg: any, match?: any) {
+  try {
+    const chatId = msg.chat.id;
+    if (await isMaintenanceActive(chatId)) return;
 
       await clearSession(chatId);
 
@@ -834,12 +829,12 @@ function setupBotHandlers(bot: TelegramBot) {
     } catch (err: any) {
       console.error('Error in /start handler:', err);
     }
-  });
+}
 
-    // Handle text messages
-    bot.on('message', async (msg) => {
-      const chatId = msg.chat.id;
-      if (await isMaintenanceActive(chatId)) return;
+async function handleMessage(b: TelegramBot, msg: any) {
+  try {
+    const chatId = msg.chat.id;
+    if (await isMaintenanceActive(chatId)) return;
 
       const user = await getOrCreateUser(msg.from);
       const lang = user?.language || 'ar';
@@ -1330,17 +1325,20 @@ function setupBotHandlers(bot: TelegramBot) {
         await bot?.sendMessage(chatId, noSessionMsg, { parse_mode: 'HTML', reply_markup: kb });
         return;
       }
-    });
+    } catch (err: any) {
+      console.error('Error in handleMessage:', err);
+    }
+}
 
-    // Handle Inline Button callback queries
-    bot.on('callback_query', async (query) => {
-      const chatId = query.message?.chat.id;
-      const messageId = query.message?.message_id;
-      const data = query.data;
+async function handleCallbackQuery(b: TelegramBot, query: any) {
+  try {
+    const chatId = query.message?.chat.id;
+    const messageId = query.message?.message_id;
+    const data = query.data;
 
-      if (!chatId || !data) return;
-      safeBotEdit(() => bot?.answerCallbackQuery(query.id));
-      if (await isMaintenanceActive(chatId)) return;
+    if (!chatId || !data) return;
+    safeBotEdit(() => b.answerCallbackQuery(query.id));
+    if (await isMaintenanceActive(chatId)) return;
 
       const user = await getOrCreateUser(query.from);
       const lang = user?.language || 'ar';
@@ -2363,7 +2361,39 @@ function setupBotHandlers(bot: TelegramBot) {
           console.error(e);
         }
       }
-    });
+  } catch (err: any) {
+    console.error('Error in handleCallbackQuery:', err);
+  }
+}
+
+function setupBotHandlers(bot: TelegramBot) {
+  bot.on('polling_error', (err: any) => {
+    const errMsg = err.message || '';
+    console.error('Telegram Bot Polling Error:', errMsg);
+    if (errMsg.includes('409') || errMsg.toLowerCase().includes('conflict')) {
+      botStatus = 'Error';
+      botError = 'خطأ 409: هناك نسخة أخرى من البوت تعمل بنفس التوكن حالياً.';
+    } else if (errMsg.includes('401') || errMsg.toLowerCase().includes('unauthorized')) {
+      botStatus = 'Unauthorized';
+      botError = '401 Unauthorized: يرجى التحقق من توكن البوت وتحديثه في الإعدادات.';
+      try {
+        bot?.stopPolling();
+      } catch (stopErr) {}
+    }
+  });
+
+  bot.onText(/\/start(?:\s+(.+))?/, (msg, match) => {
+    handleStartCommand(bot, msg, match).catch(console.error);
+  });
+
+  bot.on('message', (msg) => {
+    if (msg.text?.startsWith('/start')) return;
+    handleMessage(bot, msg).catch(console.error);
+  });
+
+  bot.on('callback_query', (query) => {
+    handleCallbackQuery(bot, query).catch(console.error);
+  });
 }
 
 // REST API Endpoints
