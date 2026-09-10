@@ -20,7 +20,7 @@ app.use('/api', (req, res, next) => {
 // Telegram Webhook Endpoint
 app.post(`/api/telegram-webhook`, async (req, res) => {
   try {
-    const b = ensureBotFast();
+    const b = await getTelegramBot();
     if (b && req.body) {
       await b.processUpdate(req.body);
     }
@@ -587,22 +587,20 @@ async function notifyRestock(productId: number, productName: string, price: numb
 let botInitializingPromise: Promise<TelegramBot | null> | null = null;
 let webhookRegisteredUrl = '';
 
-function ensureBotFast(): TelegramBot | null {
+async function getTelegramBot(): Promise<TelegramBot | null> {
   if (bot) return bot;
+  const settings = await getSettings().catch(() => ({} as any));
+  if (settings.telegram_bot_token) {
+    TELEGRAM_BOT_TOKEN = settings.telegram_bot_token;
+  }
+  if (settings.telegram_admin_chat_id) {
+    TELEGRAM_ADMIN_CHAT_ID = settings.telegram_admin_chat_id;
+  }
   if (!TELEGRAM_BOT_TOKEN) return null;
+
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
   botStatus = 'Active';
   setupBotHandlers(bot);
-
-  // Sync settings and bot info in the background without blocking
-  getSettings().then(settings => {
-    if (settings.telegram_bot_token && settings.telegram_bot_token !== TELEGRAM_BOT_TOKEN) {
-      TELEGRAM_BOT_TOKEN = settings.telegram_bot_token;
-    }
-    if (settings.telegram_admin_chat_id) {
-      TELEGRAM_ADMIN_CHAT_ID = settings.telegram_admin_chat_id;
-    }
-  }).catch(() => {});
 
   bot.getMe().then(me => {
     botUsername = me.username || '';
