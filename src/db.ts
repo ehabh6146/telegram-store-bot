@@ -400,7 +400,7 @@ export async function getSettings(): Promise<{
 
 export async function saveSettings(token: string, adminChatId: string) {
   const current = await getSettings();
-  const mMode = current.maintenance_mode ? 1 : 0;
+  const mMode = Boolean(current.maintenance_mode);
   const mMsg = current.maintenance_message || '🛠️ عذراً، البوت قيد الصيانة والتطوير حالياً لتحسين خدماتنا. سنعود للعمل قريباً جداً! 🙏';
   await runQuery('DELETE FROM settings');
   await runQuery('INSERT INTO settings (telegram_bot_token, telegram_admin_chat_id, maintenance_mode, maintenance_message) VALUES (?, ?, ?, ?)', [token, adminChatId, mMode, mMsg]);
@@ -422,7 +422,7 @@ export async function saveMaintenanceSettings(enabled: boolean, message: string)
   await runQuery('INSERT INTO settings (telegram_bot_token, telegram_admin_chat_id, maintenance_mode, maintenance_message) VALUES (?, ?, ?, ?)', [
     token,
     adminChatId,
-    enabled ? 1 : 0,
+    Boolean(enabled),
     message
   ]);
 }

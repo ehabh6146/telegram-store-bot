@@ -2903,7 +2903,7 @@ app.post('/api/providers', async (req, res) => {
 
     const result = await runQuery(`
       INSERT INTO providers (name, api_type, api_url, api_key, profit_type, profit_value, balance, currency, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, true)
     `, [
       name,
       api_type || 'xprostore',
@@ -2937,7 +2937,7 @@ app.put('/api/providers/:id', async (req, res) => {
       api_key.trim(),
       profit_type || 'percentage',
       Number(profit_value) || 20,
-      is_active !== undefined ? (is_active ? 1 : 0) : 1,
+      is_active !== undefined ? Boolean(is_active) : true,
       id
     ]);
     res.json({ success: true });
@@ -3101,7 +3101,7 @@ app.post('/api/providers/:id/import-service', async (req, res) => {
 
     const prodRes = await runQuery(`
       INSERT INTO products (category_id, name, description, price, stock, fake_stock, digital_content, icon, image_url, is_provider_service, provider_id, provider_service_id, provider_price, custom_fields)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?, ?, ?)
     `, [
       targetCategoryId || null,
       custom_name,
@@ -3203,7 +3203,7 @@ app.post('/api/providers/:id/bulk-import-all', async (req, res) => {
       } else {
         await runQuery(`
           INSERT INTO products (category_id, name, description, price, provider_price, stock, fake_stock, digital_content, icon, image_url, is_provider_service, provider_id, provider_service_id, custom_fields)
-          VALUES (?, ?, ?, ?, ?, ?, 0, 'تسليم تلقائي عبر مزود الخدمة API', ?, ?, 1, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, 0, 'تسليم تلقائي عبر مزود الخدمة API', ?, ?, true, ?, ?, ?)
         `, [
           targetCategoryId,
           serviceName,
