@@ -1538,7 +1538,7 @@ export default function App() {
                   <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800/80 flex items-center justify-between shadow-lg">
                     <div>
                       <span className="text-slate-400 text-xs mb-1 block font-bold">إجمالي المبيعات</span>
-                      <h3 className="text-2xl font-black text-white">{stats.totalSales.toFixed(2)} ج.م</h3>
+                      <h3 className="text-2xl font-black text-white">{Number(stats?.totalSales || 0).toFixed(2)} ج.م</h3>
                     </div>
                     <div className="p-3 bg-emerald-500/10 text-emerald-400 rounded-2xl border border-emerald-500/20">
                       <DollarSign className="w-6 h-6" />
@@ -2476,7 +2476,7 @@ export default function App() {
                                   </button>
                                 </div>
                                 <div className="text-lg font-black text-emerald-400 font-mono">
-                                  {p.balance !== undefined ? `${p.balance.toFixed(2)} ${p.currency || 'USD'}` : '0.00 USD'}
+                                  {Number(p.balance || 0).toFixed(2)} {p.currency || 'USD'}
                                 </div>
                               </div>
 
@@ -4174,16 +4174,16 @@ export default function App() {
               </div>
               <div className="flex justify-between items-center text-xs">
                 <span className="text-slate-400">التكلفة المطلوبة لدى المزود:</span>
-                <span className="text-rose-400 font-mono font-bold">{insufficientBalanceModalData.requiredCost.toFixed(2)} {insufficientBalanceModalData.currency}</span>
+                <span className="text-rose-400 font-mono font-bold">{Number(insufficientBalanceModalData.requiredCost || 0).toFixed(2)} {insufficientBalanceModalData.currency}</span>
               </div>
               <div className="flex justify-between items-center text-xs">
                 <span className="text-slate-400">رصيدك المتاح حالياً لدى المزود:</span>
-                <span className="text-amber-400 font-mono font-bold">{insufficientBalanceModalData.currentBalance.toFixed(2)} {insufficientBalanceModalData.currency}</span>
+                <span className="text-amber-400 font-mono font-bold">{Number(insufficientBalanceModalData.currentBalance || 0).toFixed(2)} {insufficientBalanceModalData.currency}</span>
               </div>
               <div className="border-t border-slate-800 pt-2 flex justify-between items-center text-xs">
                 <span className="text-slate-300 font-semibold">المبلغ الناقص للشحن:</span>
                 <span className="text-rose-500 font-mono font-black text-sm">
-                  {(insufficientBalanceModalData.requiredCost - insufficientBalanceModalData.currentBalance).toFixed(2)} {insufficientBalanceModalData.currency}
+                  {Number((insufficientBalanceModalData.requiredCost || 0) - (insufficientBalanceModalData.currentBalance || 0)).toFixed(2)} {insufficientBalanceModalData.currency}
                 </span>
               </div>
             </div>
